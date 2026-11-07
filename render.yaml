@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: zygy-voice-ai
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: EXT_PATH
+        value: "1"
+      - key: TEXT_MODEL
+        value: "gemini-3.6-flash"
+      - key: TTS_MODEL
+        value: "gemini-3.8-flash-tts"
+      - key: EXTENSIONS
+        value: "[{\"p\":\"1\",\"m\":\"2\",\"g\":\"שלום אני זיגי שאל אותי כל דבר ובסיום הקש סולמית\",\"x\":\"\"}]"
+      - key: MAX_WORDS
+        value: "25"
+      - key: EXTRA_INSTRUCTION
+        value: ""
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: GEMINI_TTS_KEYS
+        sync: false
+      - key: YEMOT_TOKEN
+        sync: false
