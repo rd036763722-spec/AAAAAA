@@ -12,12 +12,20 @@ services:
         value: "22"
       - key: EXT_PATH
         value: "1"
+      - key: HIST_PATH
+        value: "4"
       - key: TEXT_MODEL
         value: "gemini-3.6-flash"
       - key: TTS_MODEL
         value: "gemini-3.8-flash-tts"
+      - key: DEFAULT_VOICE
+        value: "male"
+      - key: VOICE_MALE
+        value: "Charon"
+      - key: VOICE_FEMALE
+        value: "Kore"
       - key: EXTENSIONS
-        value: "[{\"p\":\"1\",\"m\":\"2\",\"g\":\"שלום אני זיגי שאל אותי כל דבר ובסיום הקש סולמית\",\"x\":\"\"}]"
+        value: "[{\"p\":\"1\",\"m\":\"2\",\"g\":\"שלום אנא הקלט את ההודעה בסיום הקש סולמית\",\"x\":\"\"}]"
       - key: MAX_WORDS
         value: "25"
       - key: EXTRA_INSTRUCTION
@@ -27,4 +35,8 @@ services:
       - key: GEMINI_TTS_KEYS
         sync: false
       - key: YEMOT_TOKEN
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
         sync: false

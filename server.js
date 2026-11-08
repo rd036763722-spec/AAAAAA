@@ -1,530 +1,311 @@
-// server.js — Yemot voice bot + Gemini
-// Requires Node.js 18+ and express.
-// Environment variables are read at process startup; restart the Render service after changing them.
-
-'use strict';
-
 const express = require('express');
 const crypto = require('crypto');
-
+const fs = require('fs');
+const path = require('path');
 const app = express();
-app.use(express.urlencoded({ extended: true, limit: '2mb' }));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true }));
 
-// -------------------------------
-// Configuration
-// -------------------------------
-
+// two separate key pools: GEMINI_API_KEYS for transcription (audio understanding), GEMINI_TTS_KEYS for read-aloud
 const keyList = v => String(v || '').split(',').map(s => s.trim()).filter(Boolean);
 const KEYS = keyList(process.env.GEMINI_API_KEYS);
 const TTS_KEYS = keyList(process.env.GEMINI_TTS_KEYS);
-
 const TEXT_MODEL = process.env.TEXT_MODEL || 'gemini-3.6-flash';
-const TEXT_MODEL_FALLBACK = process.env.TEXT_MODEL_FALLBACK || '';
 const TTS_MODEL = process.env.TTS_MODEL || 'gemini-3.8-flash-tts';
-const TTS_MODEL_FALLBACK = process.env.TTS_MODEL_FALLBACK || '';
-const VOICE = process.env.VOICE || 'Kore';
-
-const EXT = (process.env.EXT_PATH || '7').replace(/^\/+|\/+$/g, '');
-const HISTORY_EXT = String(process.env.HISTORY_EXT || '4').replace(/^\/+|\/+$/g, '');
-
-const TOKEN = process.env.YEMOT_TOKEN ||
-  (process.env.YEMOT_API_USERNAME && process.env.YEMOT_API_PASSWORD
-    ? process.env.YEMOT_API_USERNAME + ':' + process.env.YEMOT_API_PASSWORD
-    : '');
-
+const VOICE_MALE = process.env.VOICE_MALE || 'Charon';
+const VOICE_FEMALE = process.env.VOICE_FEMALE || 'Kore';
+const DEFAULT_VOICE = process.env.DEFAULT_VOICE === 'female' ? 'female' : 'male';
+const EXT = (process.env.EXT_PATH || '1').replace(/^\/+|\/+$/g, '');
+const HIST_EXT = (process.env.HIST_PATH || '4').replace(/^\/+|\/+$/g, '');
+const HIST_DIR = '/' + HIST_EXT;
+const TOKEN = process.env.YEMOT_TOKEN || (process.env.YEMOT_API_USERNAME + ':' + process.env.YEMOT_API_PASSWORD);
 const YM = process.env.YEMOT_BASE || 'https://www.call2all.co.il/ym/api/';
-const GBASE = process.env.GEMINI_BASE ||
-  'https://generativelanguage.googleapis.com/v1beta/models/';
-
-const BUDGET = Math.max(15000, Number(process.env.TURN_BUDGET_MS) || 40000);
-const SEARCH = String(process.env.WEB_SEARCH || '1') !== '0';
-const SEARCH_AUTO = String(process.env.SEARCH_MODE || 'phrase') === 'auto';
-
-const siteList = v => keyList(v)
-  .map(x => x.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase())
-  .filter(x => /^[a-z0-9.-]+$/.test(x));
-
-const SITES = siteList(process.env.SEARCH_SITES);
-const URLS = keyList(process.env.SEARCH_URLS)
-  .filter(x => /^https?:\/\/\S+$/i.test(x))
-  .slice(0, 10);
-
+const GBASE = process.env.GEMINI_BASE || 'https://generativelanguage.googleapis.com/v1beta/models/';
+const BUDGET = Number(process.env.TURN_BUDGET_MS) || 40000;
 const REC_MAX = String(parseInt(process.env.REC_MAX, 10) || 30);
-const MAXW = Math.min(300, Math.max(5, parseInt(process.env.MAX_WORDS, 10) || 25));
 
-const EXTRA = String(process.env.EXTRA_INSTRUCTION || '')
-  .replace(/\s+/g, ' ').trim().slice(0, 2000);
+// where the conversation history is kept: Upstash Redis (survives restarts) or local files (lost on every restart on Render free)
+const UP_URL = process.env.UPSTASH_REDIS_REST_URL || '';
+const UP_TOK = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const MAXC = 8; // saved conversations per phone number (digits 1-8, digit 9 is a new conversation)
 
-const VOICE_SET = {
-  male: process.env.VOICE_MALE || 'Puck',
-  female: process.env.VOICE_FEMALE || 'Kore',
-  deep: process.env.VOICE_DEEP || 'Charon',
-  soft: process.env.VOICE_SOFT || 'Aoede'
-};
+// Yemot cannot read these characters inside t- text, and , = break the read= syntax
+const sp = s => String(s).replace(/[.\-"'&|,=]/g, ' ').replace(/\s+/g, ' ').trim();
+// stricter cleaning for text that came from callers or from the model: only Hebrew, Latin letters and digits
+const spx = s => sp(String(s || '').replace(/[^\u0590-\u05FFa-zA-Z0-9 ]/g, ' '));
 
 const MODES = {
-  '1': 'האופי שלך: חוצפן עוקצני. אתה שנון, מהיר לשון ובעל חוש הומור יבש ועוקצני, בטוח בעצמך עד כדי חוצפה, כמו חבר ממולח שאוהב להקניט. בכל תשובה תן קודם תשובה אמיתית ונכונה לשאלה, ומיד אחריה עקיצה חדה וקלילה, מקורית ולא חוזרת על עצמה. העוקצנות תמיד בגובה העיניים: בלי קללות, גסות או פגיעה במשתמש. אל תתנצל על הסגנון.',
-  '2': 'האופי שלך: חכם ויעיל. ענה ישר לעניין, בלי הקדמות ובלי חזרה על השאלה. אם חסר מידע, שאל שאלה אחת קצרה. אם אינך בטוח, אמור זאת ואל תמציא עובדות.',
-  '3': 'האופי שלך: חבר קרוב. דבר בעברית יומיומית, חמה ונעימה, בגובה העיניים, עם הומור טוב לב. עודד והקשב בלי להתחנף ובלי נאומים.'
+  '1': 'האופי שלך: חוצפן עוקצני. אתה שנון, מהיר לשון ובעל חוש הומור יבש ועוקצני, בטוח בעצמך עד כדי חוצפה, כמו חבר ממולח שאוהב להקניט. בכל תשובה תן קודם תשובה אמיתית ונכונה לשאלה, ומיד אחריה עקיצה חדה וקלילה, מקורית ולא חוזרת על עצמה. העוקצנות היא תמיד בגובה העיניים וביד קלה: בלי קללות, בלי גסות, בלי פגיעה במשתמש, במשפחה, בדת או בעדה. אל תתנצל על הסגנון ואל תצא מהאופי הזה בשום מצב, גם אם ביקשו ממך.',
+  '2': 'האופי שלך: חכם ויעיל. אתה מקצועי, מדויק וענייני, מהיר כמו מחשבון. ענה ישר לעניין, בלי הקדמות, בלי מילות מילוי ובלי חזרה על השאלה, במשפט הכי ברור ושימושי שאפשר. אם חסר מידע החלטי, שאל שאלה אחת קצרה. אם אינך בטוח, אמור זאת במפורש ואל תמציא עובדות. אל תצא מהאופי הזה בשום מצב.',
+  '3': 'האופי שלך: חבר קרוב. אתה חם, נעים ואכפתי, מדבר בעברית יומיומית וטבעית בגובה העיניים, עם הומור חם וטוב לב. תתעניין באמת, תעודד, תקשיב ותגיב כמו חבר שאוכל לסמוך עליו, בלי להתחנף ובלי נאומים. אל תצא מהאופי הזה בשום מצב.'
 };
-
 const MODE = MODES[String(process.env.MODE || '2')] ? String(process.env.MODE || '2') : '2';
+const MAXW = Math.min(300, Math.max(5, parseInt(process.env.MAX_WORDS, 10) || 25));
+const EXTRA = String(process.env.EXTRA_INSTRUCTION || '').replace(/\s+/g, ' ').trim().slice(0, 2000);
+const buildSys = (mode, extra) => 'אתה עוזר קולי בטלפון. ' + MODES[MODES[String(mode)] ? String(mode) : '2'] +
+  ' חובה מוחלטת: שמור על האופי הזה בכל תשובה ובכל סיבוב שיחה. ענה בעברית בקצרה ובבהירות, בעד ' + MAXW + ' מילים, בלי רשימות ובלי סימנים מיוחדים. ' +
+  (EXTRA ? 'הנחיה כללית מהבעלים: ' + EXTRA + ' ' : '') +
+  (extra ? 'הנחיה לשלוחה הזאת מהבעלים: ' + extra + ' ' : '');
 
-const DEFAULT_GREET = 'הקלט את ההודעה בסיום הקש סולמית';
-const AGAIN = 'לא שמעתי שאל שוב';
-const ERR = 'הייתה תקלה נסו שוב';
+// added to every turn: the model returns JSON so the server knows what was asked, which voice was requested and whether to search the web
+const ROUTER = ' פורמט התשובה: החזר אך ורק אובייקט JSON תקין, בלי טקסט נוסף ובלי סימוני קוד, במבנה {"q":"","a":"","voice":"","search":false}. ' +
+  'השדה q הוא תמלול קצר ומדויק של מה שהמשתמש אמר בהקלטה. ' +
+  'השדה a הוא התשובה שלך בעברית, בלי רשימות ובלי סימנים מיוחדים. ' +
+  'השדה voice: אם המשתמש ביקש במפורש שתדבר בקול נשי החזר female, אם ביקש קול גברי החזר male, אחרת מחרוזת ריקה. כשמבקשים רק להחליף קול, אשר זאת בקצרה בשדה a. ' +
+  'השדה search: החזר true רק אם המשתמש ביקש במפורש לחפש באינטרנט או ברשת או לבדוק באתר, ובמקרה כזה השאר את a ריק. בכל מקרה אחר החזר false. ' +
+  'השיחה רציפה: שאלות המשך מתייחסות לשאלות ולתשובות הקודמות בשיחה, ענה בהתאם ואל תבקש מהמשתמש להסביר או להגדיר שוב.';
+const SEARCH_W = Math.min(300, MAXW * 2);
+const SEARCH_NOTE = ' ענה על סמך תוצאות החיפוש באינטרנט, בעברית, בעד ' + SEARCH_W + ' מילים, בלי כתובות אתרים, בלי מספרי הפניה ובלי סימנים מיוחדים. השיחה רציפה ושאלות המשך מתייחסות לתשובות הקודמות.';
 
-const voiceRule =
-  'אם המשתמש מבקש לשנות את הקול, התחל בתג אחד בלבד: ' +
-  '[[VOICE:male]] לקול גבר, [[VOICE:female]] לקול אישה, ' +
-  '[[VOICE:deep]] לקול עמוק, [[VOICE:soft]] לקול רך. ' +
-  'אחרי התג אשר בקצרה. אל תשתמש בתג במקרה אחר. ';
-
-const memoryRule =
-  'בתחילת כל תשובה כתוב תג [[Q:תמלול קצר ונאמן של דברי המשתמש]] ' +
-  'ואחריו התשובה. התג אינו מושמע. ';
-
-function searchRule(sites = SITES) {
-  let r = SEARCH_AUTO
-    ? 'השתמש בחיפוש רק אם השאלה דורשת מידע עדכני או אם המשתמש ביקש חיפוש. '
-    : 'השתמש בחיפוש באינטרנט רק אם המשתמש ביקש זאת במפורש. אחרת ענה מהידע שלך. ';
-  if (sites.length) r += 'העדף את האתרים האלה: ' + sites.join(' ') + '. ';
-  if (URLS.length) r += 'בעת חיפוש בדוק גם את הדפים האלה: ' + URLS.join(' ') + '. ';
-  return r;
-}
-
-function buildSys(mode, extra, sites = SITES) {
-  return 'אתה עוזר קולי בטלפון. ' +
-    MODES[MODES[String(mode)] ? String(mode) : '2'] + ' ' +
-    'ענה בעברית בקצרה ובבהירות, בעד ' + MAXW + ' מילים. ' +
-    searchRule(sites) + voiceRule + memoryRule +
-    (EXTRA ? 'הנחיה כללית מהבעלים: ' + EXTRA + ' ' : '') +
-    (extra ? 'הנחיה לשלוחה הזאת מהבעלים: ' + extra + ' ' : '');
-}
-
-// -------------------------------
-// Extension configuration
-// -------------------------------
-
+// one entry per Yemot extension: its own character mode, extra instruction and opening message
 let CFG = [];
-try { CFG = JSON.parse(process.env.EXTENSIONS || '[]'); } catch (_) { CFG = []; }
-
-if (!Array.isArray(CFG) || !CFG.length) {
-  CFG = [{ p: EXT, m: MODE, x: '', g: process.env.GREETING || '' }];
-}
-
+try { CFG = JSON.parse(process.env.EXTENSIONS || '[]'); } catch (e) { CFG = []; }
+if (!Array.isArray(CFG) || !CFG.length) CFG = [{ p: EXT, m: process.env.MODE || '2', x: '', g: process.env.GREETING || '' }];
+const DEFAULT_GREET = 'שלום אנא הקלט את ההודעה בסיום הקש סולמית';
 const EXTS = {};
 for (const c of CFG) {
   const p = String(c.p || '').replace(/^\/+|\/+$/g, '');
   if (!/^[0-9]+(\/[0-9]+)*$/.test(p)) continue;
   EXTS[p.replace(/\//g, '_')] = {
-    p,
-    d: '/' + p,
-    sys: buildSys(c.m, String(c.x || '').replace(/\s+/g, ' ').trim().slice(0, 1000),
-      c.s ? siteList(c.s) : SITES),
-    g: cleanYemotText(String(c.g || '').slice(0, 300)) || cleanYemotText(DEFAULT_GREET)
+    p, d: '/' + p,
+    sys: buildSys(c.m, String(c.x || '').replace(/\s+/g, ' ').trim().slice(0, 1000)),
+    g: sp(String(c.g || '').slice(0, 300)) || sp(DEFAULT_GREET)
   };
 }
+const EXT_FIRST = EXTS[Object.keys(EXTS)[0]] || { p: EXT, d: '/' + EXT, sys: buildSys('2', ''), g: sp(DEFAULT_GREET) };
+const AGAIN = sp('לא שמעתי שאל שוב');
+const ERR = sp('הייתה תקלה נסו שוב');
+const REC_HINT = sp('אפשר להקליט עכשיו את ההודעה ובסיום הקש סולמית');
 
-const EXT_FIRST = EXTS[Object.keys(EXTS)[0]] || {
-  p: EXT, d: '/' + EXT, sys: buildSys(MODE, ''), g: cleanYemotText(DEFAULT_GREET)
-};
-
-// -------------------------------
-// General helpers
-// -------------------------------
-
-function cleanYemotText(s) {
-  return String(s)
-    .replace(/[.\-"'&|,=]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const isBudget = e => e && /budget exhausted/i.test(e.message || '');
+const EXTP = '/' + EXT;
+const yp = (name, d) => 'ivr2:' + (d === undefined ? EXTP : d) + '/' + name + '.wav';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const isBudget = e => e && /budget/.test(e.message || '');
 const rot = { text: 0, tts: 0 };
 const calls = {};
 
+// drop state of calls that never sent hangup
 setInterval(() => {
   const now = Date.now();
-  for (const id of Object.keys(calls)) {
-    if (now - calls[id].t > 3600000) {
-      if (calls[id].r) del(calls[id].r, calls[id].d);
-      delete calls[id];
-    }
-  }
+  for (const id of Object.keys(calls)) if (now - calls[id].t > 3600000) delete calls[id];
 }, 600000).unref();
 
-async function http(url, opt = {}, ms = 10000, deadline) {
+// ---------- storage of users (voice choice + saved conversations), keyed by caller phone number ----------
+const cache = new Map();
+async function upstash(cmd) {
+  const r = await fetch(UP_URL, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + UP_TOK, 'Content-Type': 'application/json' },
+    body: JSON.stringify(cmd),
+    signal: AbortSignal.timeout(5000)
+  });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error);
+  return j.result;
+}
+async function getUser(phone) {
+  if (cache.has(phone)) return cache.get(phone);
+  let u = null;
+  try {
+    let raw = null;
+    if (UP_URL && UP_TOK) raw = await upstash(['GET', 'zygy:u:' + phone]);
+    else raw = await fs.promises.readFile(path.join(DATA_DIR, phone + '.json'), 'utf8').catch(() => null);
+    if (raw) u = JSON.parse(raw);
+  } catch (e) { console.error('store load', e.message); }
+  if (!u || !Array.isArray(u.c)) u = { v: '', c: [] };
+  if (cache.size > 500) cache.delete(cache.keys().next().value);
+  cache.set(phone, u);
+  return u;
+}
+function persist(phone, u) {
+  const raw = JSON.stringify(u);
+  (async () => {
+    try {
+      if (UP_URL && UP_TOK) await upstash(['SET', 'zygy:u:' + phone, raw]);
+      else {
+        await fs.promises.mkdir(DATA_DIR, { recursive: true });
+        await fs.promises.writeFile(path.join(DATA_DIR, phone + '.json'), raw);
+      }
+    } catch (e) { console.error('store save', e.message); }
+  })();
+}
+
+const titleOf = t => spx(t).split(' ').filter(Boolean).slice(0, 6).join(' ') || 'ללא כותרת';
+async function saveTurn(s, qText, text) {
+  if (!s.phone) return;
+  const u = await getUser(s.phone);
+  let c = u.c.find(x => x.id === s.cid);
+  if (!c) { c = { id: s.cid, title: titleOf(qText), ts: 0, turns: [] }; u.c.unshift(c); }
+  c.ts = Date.now();
+  c.turns.push({ q: String(qText || '').slice(0, 300), a: String(text || '').slice(0, 600) });
+  if (c.turns.length > 40) c.turns = c.turns.slice(-40);
+  u.c.sort((a, b) => b.ts - a.ts);
+  u.c = u.c.slice(0, MAXC);
+  u.v = s.v;
+  persist(s.phone, u);
+}
+const histOf = turns => turns.slice(-8).flatMap(t => [
+  { role: 'user', parts: [{ text: t.q || '[שאלה קולית]' }] },
+  { role: 'model', parts: [{ text: t.a }] }
+]);
+
+// ---------- Gemini ----------
+// fetch with a timeout that never exceeds the remaining time of the current turn
+async function http(url, opt, ms, deadline) {
   const left = deadline ? deadline - Date.now() : ms;
   if (left < 800) throw new Error('turn budget exhausted');
-  return fetch(url, {
-    ...opt,
-    signal: AbortSignal.timeout(Math.max(800, Math.min(ms, left)))
-  });
+  return fetch(url, { ...opt, signal: AbortSignal.timeout(Math.min(ms, left)) });
 }
 
-function phoneDigits(q) {
-  return String(q.ApiPhone || q.phone || '').replace(/\D/g, '').slice(-20);
-}
-
-function historyPath(phone) {
-  return 'ivr2:/' + HISTORY_EXT + '/history_' + phone + '.txt';
-}
-
-function yp(name, d) {
-  return 'ivr2:' + (d === undefined ? '/' + EXT : d) + '/' + name + '.wav';
-}
-
-// -------------------------------
-// Persistent conversation history
-// -------------------------------
-
-const HISTORY_LIMIT = Math.max(5, Math.min(50, parseInt(process.env.HISTORY_LIMIT, 10) || 20));
-
-async function loadHistoryStore(phone, deadline) {
-  if (!phone || !TOKEN) return { sessions: [], pendingSessionId: '' };
-  try {
-    const url = YM + 'GetTextFile?token=' + encodeURIComponent(TOKEN) +
-      '&what=' + encodeURIComponent(historyPath(phone));
-    const r = await http(url, {}, 8000, deadline);
-    if (!r.ok) return { sessions: [], pendingSessionId: '' };
-    const j = await r.json().catch(() => ({}));
-    if (j.responseStatus && j.responseStatus !== 'OK') {
-      return { sessions: [], pendingSessionId: '' };
-    }
-    const data = JSON.parse(j.contents || '{}');
-    return {
-      sessions: Array.isArray(data.sessions) ? data.sessions.slice(-HISTORY_LIMIT) : [],
-      pendingSessionId: String(data.pendingSessionId || '')
-    };
-  } catch (e) {
-    console.error('history load failed:', e.message);
-    return { sessions: [], pendingSessionId: '' };
-  }
-}
-
-async function saveHistoryStore(phone, store, deadline) {
-  if (!phone || !TOKEN) return;
-  const contents = JSON.stringify({
-    sessions: (store.sessions || []).slice(-HISTORY_LIMIT),
-    pendingSessionId: String(store.pendingSessionId || '')
-  });
-  const url = YM + 'UploadTextFile?token=' + encodeURIComponent(TOKEN) +
-    '&what=' + encodeURIComponent(historyPath(phone)) +
-    '&contents=' + encodeURIComponent(contents);
-  const r = await http(url, {}, 10000, deadline);
-  const raw = await r.text();
-  if (!r.ok || /error|fail/i.test(raw)) {
-    throw new Error('UploadTextFile failed: ' + raw.slice(0, 180));
-  }
-}
-
-function historySession(store, id) {
-  return (store.sessions || []).find(x => String(x.id) === String(id));
-}
-
-function historyMenu(sessions) {
-  return sessions.slice()
-    .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
-    .slice(0, 9)
-    .map((s, i) => (i + 1) + ' ' +
-      (cleanYemotText(String(s.title || 'שיחה')).slice(0, 45) || 'שיחה'))
-    .join('. ');
-}
-
-// -------------------------------
-// Gemini diagnostics and retry logic
-// -------------------------------
-
-const THINK = ['minimal', 'low', null];
-let thinkIdx = 0;
-let searchOk = SEARCH;
-let urlOk = true;
-
-function parseRetryDelay(body, headers) {
-  const retryAfter = headers && headers.get && headers.get('retry-after');
-  if (retryAfter) {
-    const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-    const dateMs = Date.parse(retryAfter);
-    if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
-  }
-
-  try {
-    const obj = typeof body === 'string' ? JSON.parse(body) : body;
-    const details = obj && obj.error && obj.error.details;
-    if (Array.isArray(details)) {
-      for (const d of details) {
-        if (d.retryDelay) {
-          const m = /^([\d.]+)s$/.exec(String(d.retryDelay));
-          if (m) return Number(m[1]) * 1000;
-        }
-      }
-    }
-  } catch (_) {}
-  return 0;
-}
-
-function isQuotaExhausted(message) {
-  return /quota_exceeded|daily quota|exceeded your current quota|billing|spend.?limit/i.test(message || '');
-}
-
-function safeErrorBody(raw) {
-  try {
-    const j = JSON.parse(raw);
-    return {
-      message: j.error && j.error.message ? j.error.message : raw.slice(0, 500),
-      status: j.error && j.error.status ? j.error.status : '',
-      details: j.error && j.error.details ? j.error.details : []
-    };
-  } catch (_) {
-    return { message: raw.slice(0, 500), status: '', details: [] };
-  }
-}
-
-async function gemOnce(model, body, deadline, pool) {
+async function gem(model, body, deadline, pool) {
+  pool = pool || 'text';
   const list = pool === 'tts' ? TTS_KEYS : KEYS;
   if (!list.length) throw new Error(pool === 'tts' ? 'GEMINI_TTS_KEYS is empty' : 'GEMINI_API_KEYS is empty');
-
-  let lastError;
-  const maxAttempts = Math.min(3, Math.max(1, list.length));
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  let err = model + ' failed';
+  let status = 0;
+  for (let i = 0; i < list.length * 2; i++) {
     const key = list[rot[pool]++ % list.length];
-    const started = Date.now();
-
     try {
       const r = await http(GBASE + model + ':generateContent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
         body: JSON.stringify(body)
       }, 25000, deadline);
-
       if (r.ok) return await r.json();
-
-      const raw = await r.text();
-      const info = safeErrorBody(raw);
-      const msg = model + ' HTTP ' + r.status + ' ' + info.message;
-      const retryMs = parseRetryDelay(raw, r.headers);
-
-      lastError = new Error(msg);
-      lastError.status = r.status;
-      lastError.retryMs = retryMs;
-      lastError.quotaExhausted = isQuotaExhausted(info.message);
-      lastError.apiStatus = info.status;
-      lastError.apiDetails = info.details;
-
-      console.error('Gemini request failed', JSON.stringify({
-        model, pool, status: r.status, apiStatus: info.status,
-        retryMs, quotaExhausted: lastError.quotaExhausted,
-        elapsedMs: Date.now() - started, message: info.message.slice(0, 350)
-      }));
-
-      // 400/401/403/404 are not fixed by rotating API keys.
+      status = r.status;
+      err = model + ' ' + r.status + ' ' + (await r.text()).slice(0, 200);
       if (![429, 500, 502, 503, 504].includes(r.status)) break;
-
-      // A project quota or billing exhaustion will affect all keys in that project.
-      if (r.status === 429 && lastError.quotaExhausted) break;
-
-      if (attempt < maxAttempts - 1) {
-        const delay = Math.min(8000, Math.max(retryMs, 700 * Math.pow(2, attempt)));
-        if (deadline && Date.now() + delay + 1000 >= deadline) break;
-        await sleep(delay);
-      }
     } catch (e) {
       if (isBudget(e)) throw e;
-      lastError = e;
-      if (e.status && ![429, 500, 502, 503, 504].includes(e.status)) break;
-      if (attempt < maxAttempts - 1) {
-        const delay = Math.min(5000, 700 * Math.pow(2, attempt));
-        if (deadline && Date.now() + delay + 1000 >= deadline) break;
-        await sleep(delay);
-      }
+      status = 0;
+      err = model + ' ' + (e.name === 'TimeoutError' ? 'timeout' : e.message);
     }
+    await sleep(500);
   }
-  throw lastError || new Error(model + ' failed');
+  const e = new Error(err);
+  e.status = status;
+  throw e;
 }
 
-async function gem(model, body, deadline, pool = 'text') {
-    try {
-    return await gemOnce(model, body, deadline, pool);
-  } catch (e) {
-    const fallback = pool === 'tts' ? TTS_MODEL_FALLBACK : TEXT_MODEL_FALLBACK;
-    if (!fallback || fallback === model) throw e;
-    if (![429, 500, 502, 503, 504].includes(e.status || 0)) throw e;
-    console.warn('Trying configured fallback model', {
-      primary: model, fallback, status: e.status,
-      quotaExhausted: !!e.quotaExhausted
-    });
-    return await gemOnce(fallback, body, deadline, pool);
-  }
-}
-
-function generationConfig() {
-  const cfg = { maxOutputTokens: 1024 };
-  if (THINK[thinkIdx]) cfg.thinkingConfig = { thinkingLevel: THINK[thinkIdx] };
-  return cfg;
-}
-
-async function textGen(body, deadline, wantSearch = false) {
+// fastest thinking level the model accepts; remembered after the first call
+const THINK = ['minimal', 'low', null];
+let thinkIdx = 0;
+// extra = extra generationConfig fields (for example responseMimeType); dropped automatically if the model rejects them
+async function textGen(body, deadline, extra) {
+  let ex = extra || null;
   for (;;) {
-    const req = { ...body, generationConfig: generationConfig() };
-    const tools = [];
-    const useSearch = !!(SEARCH && wantSearch && searchOk);
-    const useUrl = !!(useSearch && URLS.length && urlOk);
-
-    if (useSearch) tools.push({ google_search: {} });
-    if (useUrl) tools.push({ url_context: {} });
-    if (tools.length) req.tools = tools;
-
+    const lvl = THINK[thinkIdx];
+    const gc = { maxOutputTokens: 1024, ...(ex || {}) };
+    if (lvl) gc.thinkingConfig = { thinkingLevel: lvl };
     try {
-      return await gem(TEXT_MODEL, req, deadline, 'text');
+      return await gem(TEXT_MODEL, { ...body, generationConfig: gc }, deadline, 'text');
     } catch (e) {
-      if (useUrl && e.status === 400 && /url.?context/i.test(e.message)) {
-        urlOk = false;
-        console.warn('URL context disabled after unsupported-tool response');
-        continue;
-      }
-      if (useSearch && e.status === 400 && /tool|search|ground/i.test(e.message)) {
-        searchOk = false;
-        console.warn('Google Search tool disabled after unsupported-tool response');
-        continue;
-      }
-      if (e.status === 400 && /think/i.test(e.message) && thinkIdx < THINK.length - 1) {
-        thinkIdx++;
-        console.warn('Retrying without unsupported thinking level:', THINK[thinkIdx] || 'default');
-        continue;
-      }
+      if (e.status === 400 && /think/i.test(e.message) && thinkIdx < THINK.length - 1) { thinkIdx++; continue; }
+      if (e.status === 400 && ex && /mime|json|schema|response/i.test(e.message)) { ex = null; continue; }
       throw e;
     }
   }
 }
 
-// -------------------------------
-// Explicit-search phrase detector (also used by diagnostics)
-// -------------------------------
-
-function explicitlyRequestsSearch(text) {
-  const s = String(text || '').toLowerCase();
-  if (SEARCH_AUTO) return true;
-  return /(חפש|חיפוש|תחפש|תבדוק באינטרנט|תבדוק ברשת|תבדוק באתר|תמצא באינטרנט|חפש בגוגל|בדוק באינטרנט|בדוק באתר|search (the )?(web|internet|online|google)|look up online|find (it )?online|check (this )?website)/i.test(s);
+const partsText = a => {
+  const parts = (((a.candidates || [])[0] || {}).content || {}).parts || [];
+  return parts.filter(p => !p.thought).map(p => p.text || '').join('').trim();
+};
+const clean = t => String(t || '').replace(/\[\d+(?:,\s*\d+)*\]/g, '').replace(/[*#_`~>|]/g, ' ').replace(/\s+/g, ' ').trim();
+function parseJ(t) {
+  t = String(t).replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
+  try { return JSON.parse(t); } catch (e) { /* fall through */ }
+  const m = /\{[\s\S]*\}/.exec(t);
+  if (m) { try { return JSON.parse(m[0]); } catch (e) { /* ignore */ } }
+  return null;
 }
 
-// -------------------------------
-// WAV and TTS
-// -------------------------------
-
-function wav(pcm, rate = 24000) {
+function wav(pcm, rate) {
   const h = Buffer.alloc(44);
-  h.write('RIFF');
-  h.writeUInt32LE(36 + pcm.length, 4);
-  h.write('WAVEfmt ', 8);
-  h.writeUInt32LE(16, 16);
-  h.writeUInt16LE(1, 20);
-  h.writeUInt16LE(1, 22);
-  h.writeUInt32LE(rate, 24);
-  h.writeUInt32LE(rate * 2, 28);
-  h.writeUInt16LE(2, 32);
-  h.writeUInt16LE(16, 34);
-  h.write('data', 36);
-  h.writeUInt32LE(pcm.length, 40);
+  h.write('RIFF'); h.writeUInt32LE(36 + pcm.length, 4); h.write('WAVEfmt ', 8);
+  h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22);
+  h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 2, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34);
+  h.write('data', 36); h.writeUInt32LE(pcm.length, 40);
   return Buffer.concat([h, pcm]);
 }
 
-function voiceVariants(v) {
-  // Gemini TTS uses prebuiltVoiceConfig.voiceName in the documented GenerateContent format.
-  return [{ prebuiltVoiceConfig: { voiceName: v } }];
-}
+// Gemini 3.8 TTS uses voiceConfig.voice; older TTS models use prebuiltVoiceConfig.voiceName
+const NEW_TTS = /^gemini-(3\.[8-9]|[4-9])/.test(TTS_MODEL);
+const voiceName = g => (g === 'female' ? VOICE_FEMALE : VOICE_MALE);
+const vcfg = name => (NEW_TTS
+  ? [{ voice: name }, { prebuiltVoiceConfig: { voiceName: name } }]
+  : [{ prebuiltVoiceConfig: { voiceName: name } }, { voice: name }]);
+let vIdx = 0;
 
-async function tts(text, deadline, voice) {
-  const selectedVoice = voice || VOICE;
+async function tts(text, deadline, gender) {
+  const name = voiceName(gender || DEFAULT_VOICE);
   let last = new Error('no audio from tts');
-
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let i = 0; i < 3; i++) {
     try {
-      const result = await gem(TTS_MODEL, {
-        contents: [{ role: 'user', parts: [{ text: String(text).slice(0, 800) }] }],
-        generationConfig: {
-          responseModalities: ['AUDIO'],
-          speechConfig: { voiceConfig: voiceVariants(selectedVoice)[0] }
-        }
+      const t = await gem(TTS_MODEL, {
+        contents: [{ role: 'user', parts: [{ text: text.slice(0, 800) }] }],
+        generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: vcfg(name)[vIdx] } }
       }, deadline, 'tts');
-
-      const parts = (((result.candidates || [])[0] || {}).content || {}).parts || [];
+      const parts = (((t.candidates || [])[0] || {}).content || {}).parts || [];
       const part = parts.find(p => p.inlineData && p.inlineData.data);
       if (part) {
-        let audio = Buffer.from(part.inlineData.data, 'base64');
-        if (audio.subarray(0, 4).toString() !== 'RIFF') {
-          const rateMatch = /rate=(\d+)/i.exec(part.inlineData.mimeType || '');
-          audio = wav(audio, rateMatch ? Number(rateMatch[1]) : 24000);
+        let pcm = Buffer.from(part.inlineData.data, 'base64');
+        if (pcm.subarray(0, 4).toString() !== 'RIFF') {
+          const m = /rate=(\d+)/.exec(part.inlineData.mimeType || '');
+          pcm = wav(pcm, m ? Number(m[1]) : 24000);
         }
-        return audio;
+        return pcm;
       }
-      last = new Error('no audio returned by TTS model');
+      last = new Error('no audio from tts');
     } catch (e) {
       last = e;
       if (isBudget(e)) throw e;
-      if (e.status && ![429, 500, 502, 503, 504].includes(e.status)) throw e;
+      if (e.status === 400 && /voice|speech/i.test(e.message) && vIdx < 1) vIdx++;
     }
-    if (attempt === 0) await sleep(500);
   }
   throw last;
 }
 
-// -------------------------------
-// Yemot file transfer
-// -------------------------------
-
+// ---------- Yemot files ----------
 async function download(name, deadline, d) {
   let last = '';
   for (let i = 0; i < 4; i++) {
     try {
-      const r = await http(
-        YM + 'DownloadFile?token=' + encodeURIComponent(TOKEN) +
-          '&path=' + encodeURIComponent(yp(name, d)),
-        {}, 8000, deadline
-      );
+      const r = await http(YM + 'DownloadFile?token=' + encodeURIComponent(TOKEN) + '&path=' + encodeURIComponent(yp(name, d)), {}, 8000, deadline);
       const b = Buffer.from(await r.arrayBuffer());
       if (r.ok && b.length > 100 && b.subarray(0, 4).toString() === 'RIFF') return b;
-      last = r.status + ' ' + b.subarray(0, 100).toString('utf8').replace(/\s+/g, ' ');
+      last = r.status + ' ' + b.subarray(0, 80).toString('utf8').replace(/\s+/g, ' ');
     } catch (e) {
       if (isBudget(e)) throw e;
       last = e.message;
     }
-    await sleep(400);
+    await sleep(500);
   }
   throw new Error('download failed ' + last);
 }
 
 async function upload(name, buf, deadline, d) {
   const path = yp(name, d);
+  // documented form first (token and path in the URL, file in the body), then the all-in-body form
   const attempts = [
-    { query: true, field: 'file' },
-    { query: true, field: 'upload' },
-    { query: false, field: 'upload' },
-    { query: false, field: 'file' }
+    { q: true, field: 'file' }, { q: true, field: 'upload' },
+    { q: false, field: 'upload' }, { q: false, field: 'file' }
   ];
   let last = '';
-
   for (const a of attempts) {
     try {
-      const form = new FormData();
+      const f = new FormData();
       let url = YM + 'UploadFile';
-      if (a.query) {
-        url += '?token=' + encodeURIComponent(TOKEN) +
-          '&path=' + encodeURIComponent(path) + '&convertAudio=1';
+      if (a.q) {
+        url += '?token=' + encodeURIComponent(TOKEN) + '&path=' + encodeURIComponent(path) + '&convertAudio=1';
       } else {
-        form.append('token', TOKEN);
-        form.append('path', path);
-        form.append('convertAudio', '1');
+        f.append('token', TOKEN); f.append('path', path); f.append('convertAudio', '1');
       }
-      form.append(a.field, new Blob([buf], { type: 'audio/wav' }), name + '.wav');
-      const r = await http(url, { method: 'POST', body: form }, 15000, deadline);
+      f.append(a.field, new Blob([buf], { type: 'audio/wav' }), name + '.wav');
+      const r = await http(url, { method: 'POST', body: f }, 15000, deadline);
       const j = await r.json().catch(() => ({}));
       if (r.ok && j.responseStatus === 'OK') return;
-      last = JSON.stringify(j).slice(0, 220);
+      last = JSON.stringify(j).slice(0, 200);
     } catch (e) {
       if (isBudget(e)) throw e;
       last = e.message;
@@ -533,55 +314,130 @@ async function upload(name, buf, deadline, d) {
   throw new Error('upload failed ' + last);
 }
 
+// cleanup is best effort and never blocks or fails a call
 function del(name, d) {
-  if (!name || !TOKEN) return;
-  fetch(YM + 'FileAction?token=' + encodeURIComponent(TOKEN) +
-    '&action=delete&what=' + encodeURIComponent(yp(name, d)),
-    { signal: AbortSignal.timeout(8000) }).catch(() => {});
+  fetch(YM + 'FileAction?token=' + encodeURIComponent(TOKEN) + '&action=delete&what=' + encodeURIComponent(yp(name, d)), { signal: AbortSignal.timeout(8000) }).catch(() => {});
 }
 
-// -------------------------------
-// Greeting file detection
-// -------------------------------
+app.get('/', (q, r) => { r.set('Access-Control-Allow-Origin', '*'); r.send('ok'); });
 
+// ---------- per-call state and the recording turn ----------
+const idOf = q => String(q.ApiCallId || 'x').replace(/[^a-zA-Z0-9]/g, '').slice(-24) || 'x';
+const phoneOf = q => { const p = String(q.ApiPhone || '').replace(/\D/g, ''); return p.length >= 7 ? p : ''; };
+const newCid = () => Date.now().toString(36) + crypto.randomBytes(2).toString('hex');
+
+async function mkState(q, d, sys, g, stage) {
+  const s = {
+    d, sys, g, n: 0, h: [], p: '', name: '', r: '', t: Date.now(),
+    e: crypto.randomBytes(3).toString('hex'),
+    phone: phoneOf(q), v: DEFAULT_VOICE, cid: newCid(), stage: stage || 'chat', idle: 0, sel: ''
+  };
+  if (s.phone) {
+    const u = await getUser(s.phone);
+    if (u.v === 'female' || u.v === 'male') s.v = u.v;
+  }
+  return s;
+}
+
+// every turn uses a new parameter and file name, because Yemot accumulates parameters across requests
+// (s.e keeps the names unique even if this server restarted in the middle of a call)
+function ask(s, pre) {
+  s.n++;
+  s.p = 'Q' + s.e + s.n;
+  s.name = 'q' + s.e + 'n' + s.n;
+  return 'read=' + pre + '=' + s.p + ',no,record,' + s.d + ',' + s.name + ',no,,,1,' + REC_MAX;
+}
+
+// one recording turn: download -> Gemini (answer / voice / search) -> optional web search -> TTS -> upload -> play
+async function chat(q, s, T0) {
+  if (!q[s.p]) return ask(s, 't-' + AGAIN);
+  const deadline = T0 + BUDGET;
+  const qn = s.name;
+  try {
+    const audio = await download(qn, deadline, s.d);
+    del(qn, s.d);
+    if (s.r) { del(s.r, s.d); s.r = ''; }
+    const t1 = Date.now();
+    const hist = s.h.slice(-16);
+
+    const a = await textGen({
+      systemInstruction: { parts: [{ text: s.sys + ROUTER }] },
+      contents: [...hist, { role: 'user', parts: [{ inlineData: { mimeType: 'audio/wav', data: audio.toString('base64') } }] }]
+    }, deadline, { responseMimeType: 'application/json' });
+    const raw = partsText(a);
+    if (!raw) throw new Error('empty answer ' + JSON.stringify((a.promptFeedback || {})).slice(0, 100));
+
+    const j = parseJ(raw);
+    let qText = '', text = '', wantSearch = false;
+    if (j && typeof j === 'object') {
+      qText = String(j.q || '').trim();
+      text = clean(j.a);
+      wantSearch = j.search === true || j.search === 'true';
+      if (j.voice === 'female' || j.voice === 'male') s.v = j.voice;
+    } else {
+      text = clean(raw); // the model ignored the JSON format: speak its text as is
+    }
+
+    let searched = false;
+    if (wantSearch && qText) {
+      searched = true;
+      try {
+        const sa = await textGen({
+          systemInstruction: { parts: [{ text: s.sys + SEARCH_NOTE }] },
+          contents: [...hist, { role: 'user', parts: [{ text: qText }] }],
+          tools: [{ google_search: {} }]
+        }, deadline);
+        text = clean(partsText(sa)) || 'לא מצאתי תשובה באינטרנט';
+      } catch (e) {
+        if (isBudget(e)) throw e;
+        console.error('search failed', e.message);
+        text = 'החיפוש באינטרנט לא זמין כרגע';
+      }
+    }
+    if (!text) throw new Error('empty text');
+    const t2 = Date.now();
+
+    const pcm = await tts(text, deadline, s.v);
+    const t3 = Date.now();
+
+    const rn = 'r' + s.e + 'n' + s.n;
+    await upload(rn, pcm, deadline, s.d);
+    s.r = rn;
+    s.h.push({ role: 'user', parts: [{ text: qText || '[שאלה קולית]' }] }, { role: 'model', parts: [{ text }] });
+    if (s.h.length > 20) s.h = s.h.slice(-20);
+    saveTurn(s, qText, text).catch(e => console.error('save turn', e.message));
+
+    console.log('turn', s.n, 'ok', searched ? 'search' : '', s.v, 'gemini', t2 - t1, 'ms tts', t3 - t2, 'ms total', Date.now() - T0, 'ms');
+    return ask(s, 'f-' + s.d + '/' + rn);
+  } catch (e) {
+    console.error('turn', s.n, 'failed after', Date.now() - T0, 'ms:', e.message, e.stderr ? '| ' + String(e.stderr).replace(/\s+/g, ' ') : '');
+    del(qn, s.d);
+    return ask(s, 't-' + ERR);
+  }
+}
+
+// the opening message can be a recording made by Gemini; it is played when the file greet.wav exists in the extension
 const greetOk = {};
-
 async function greetFile(d, deadline) {
   if (greetOk[d] !== undefined) return greetOk[d];
   try {
-    const r = await http(
-      YM + 'GetIVR2Dir?token=' + encodeURIComponent(TOKEN) +
-        '&path=' + encodeURIComponent('ivr2:' + d),
-      {}, 3500, deadline
-    );
+    const r = await http(YM + 'GetIVR2Dir?token=' + encodeURIComponent(TOKEN) + '&path=' + encodeURIComponent('ivr2:' + d), {}, 3500, deadline);
     const j = await r.json().catch(() => ({}));
     if (j.responseStatus !== 'OK') return false;
     greetOk[d] = JSON.stringify(j).includes('greet.wav');
     return greetOk[d];
-  } catch (_) {
+  } catch (e) {
     return false;
   }
 }
 
-// -------------------------------
-// Routes
-// -------------------------------
-
-app.get('/', (req, res) => {
-  res.set('Access-Control-Allow-Origin', '*').send('ok');
-});
-
-// Regex route accepts nested Yemot extension paths too, e.g. /yemot/1/2.
-app.all(/^\/yemot(?:\/(.*))?$/, async (req, res) => {
+// main extension: a new conversation on every call
+app.all(['/yemot', '/yemot/:e'], async (req, res) => {
   const q = { ...req.query, ...req.body };
-  const id = String(q.ApiCallId || 'x').replace(/[^a-zA-Z0-9]/g, '').slice(-24) || 'x';
-  res.type('text/plain; charset=utf-8');
-
-  const startedAt = Date.now();
-  const requestedExt = String(req.params[0] || '').replace(/^\/+|\/+$/g, '');
-  const extKey = requestedExt.replace(/\//g, '_');
-  const ext = EXTS[extKey] || EXT_FIRST;
-
+  const id = idOf(q);
+  res.type('text/plain');
+  const T0 = Date.now();
+  const ext = EXTS[String(req.params.e || '')] || EXT_FIRST;
   try {
     if (q.hangup === 'yes') {
       const old = calls[id];
@@ -589,353 +445,198 @@ app.all(/^\/yemot(?:\/(.*))?$/, async (req, res) => {
       delete calls[id];
       return res.send('noop=bye');
     }
-
-    // Extension for selecting a saved conversation.
-    if (requestedExt === HISTORY_EXT) {
-      const phone = phoneDigits(q);
-      if (!phone) return res.send('id_list_message=t-לא זיהיתי את מספר הטלפון שלך');
-
-      const deadline = Date.now() + BUDGET;
-      const store = await loadHistoryStore(phone, deadline);
-      const sessions = (store.sessions || [])
-        .slice()
-        .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
-        .slice(0, 9);
-
-      if (!sessions.length) {
-        return res.send('id_list_message=t-עדיין אין שיחות שמורות. חזור לשלוחה ' + EXT + ' כדי להתחיל שיחה חדשה');
-      }
-
-      if (q.HSEL) {
-        const n = parseInt(String(q.HSEL), 10);
-        const selected = sessions[n - 1];
-        if (!selected) {
-          return res.send('read=t-הבחירה לא תקינה. ' + historyMenu(sessions) +
-            ' הקש מספר שיחה=HSEL,,1,1,7,No,yes,yes,,,,,Ok');
-        }
-        store.pendingSessionId = String(selected.id);
-        await saveHistoryStore(phone, store, deadline);
-        return res.send('id_list_message=t-השיחה נבחרה. ממשיכים מאותה נקודה&go_to_folder=/' + EXT);
-      }
-
-      return res.send('read=t-לבחירת שיחה קודמת, הקש את המספר המתאים. ' +
-        historyMenu(sessions) +
-        ' הקש מספר שיחה=HSEL,,1,1,7,No,yes,yes,,,,,Ok');
-    }
-
-    const s = calls[id] || (calls[id] = {
-      d: ext.d, sys: ext.sys, g: ext.g, n: 0, h: [],
-      p: '', name: '', r: '', t: 0,
-      e: crypto.randomBytes(3).toString('hex'),
-      phone: phoneDigits(q), historyLoaded: false,
-      historyStore: null, sessionId: '', voice: VOICE
-    });
-
+    const s = calls[id] || (calls[id] = await mkState(q, ext.d, ext.sys, ext.g));
     s.t = Date.now();
-    if (!s.phone) s.phone = phoneDigits(q);
-
-    if (!s.historyLoaded) {
-      s.historyStore = await loadHistoryStore(s.phone, Date.now() + 10000);
-      const chosen = historySession(s.historyStore, s.historyStore.pendingSessionId);
-
-      if (chosen) {
-        s.sessionId = String(chosen.id);
-        s.h = (chosen.messages || []).slice(-12).map(m => ({
-          role: m.role === 'user' ? 'user' : 'model',
-          parts: [{ text: String(m.text || '') }]
-        }));
-        s.g = 'המשכנו שיחה קודמת. המשך מאותו הקשר ואל תתחיל מחדש.';
-        s.historyStore.pendingSessionId = '';
-        await saveHistoryStore(s.phone, s.historyStore, Date.now() + 10000);
-      } else {
-        s.sessionId = crypto.randomBytes(6).toString('hex');
-      }
-      s.historyLoaded = true;
-    }
-
-    const ask = pre => {
-      s.n++;
-      s.p = 'Q' + s.e + s.n;
-      s.name = 'q' + s.e + 'n' + s.n;
-      return 'read=' + pre + '=' + s.p + ',no,record,' + s.d + ',' +
-        s.name + ',no,,,1,' + REC_MAX;
-    };
-
     if (!s.name) {
-      const hasGreetingFile = process.env.USE_GREET_FILE === '1' &&
-        await greetFile(s.d, Date.now() + 4000);
-      const greeting = hasGreetingFile ? 'f-' + s.d + '/greet' : 't-' + s.g;
-      return res.send(ask(greeting));
+      const g = (await greetFile(s.d, Date.now() + 4000)) ? 'f-' + s.d + '/greet' : 't-' + s.g;
+      return res.send(ask(s, g));
     }
-
-    if (!q[s.p]) return res.send(ask('t-' + cleanYemotText(AGAIN)));
-
-    const deadline = startedAt + BUDGET;
-    const questionFile = s.name;
-    let output;
-
-    try {
-      const audio = await download(questionFile, deadline, s.d);
-      del(questionFile, s.d);
-
-      if (s.r) {
-        del(s.r, s.d);
-        s.r = '';
-      }
-
-      const t1 = Date.now();
-      // One Gemini request per turn: the model hears the audio directly.
-      // Google Search is available when enabled, but the system prompt instructs
-      // the model to invoke it only for an explicit request (unless SEARCH_MODE=auto).
-      const generated = await textGen({
-        systemInstruction: { parts: [{ text: s.sys }] },
-        contents: [
-          ...s.h.slice(-8),
-          { role: 'user', parts: [{ inlineData: {
-            mimeType: 'audio/wav', data: audio.toString('base64')
-          } }] }
-        ]
-      }, deadline, SEARCH);
-            const parts = (((generated.candidates || [])[0] || {}).content || {}).parts || [];
-      let text = parts.filter(p => !p.thought).map(p => p.text || '').join('').trim();
-      if (!text) throw new Error('empty answer ' + JSON.stringify(generated.promptFeedback || {}).slice(0, 120));
-
-      const questionMatch = /\[\[Q:([\s\S]*?)\]\]/i.exec(text);
-      const heard = questionMatch
-        ? questionMatch[1].replace(/\s+/g, ' ').trim().slice(0, 500)
-        : '[שאלה קולית]';
-
-      const voiceMatch = /\[\[\s*VOICE\s*:\s*(\w+)\s*\]\]/i.exec(text);
-      if (voiceMatch && VOICE_SET[voiceMatch[1].toLowerCase()]) {
-        s.voice = VOICE_SET[voiceMatch[1].toLowerCase()];
-      }
-      text = text.replace(/\[\[[^\]]*\]\]/g, '').trim();
-      const t2 = Date.now();
-
-      const pcm = await tts(text, deadline, s.voice);
-      const t3 = Date.now();
-
-      const responseFile = 'r' + s.e + 'n' + s.n;
-      await upload(responseFile, pcm, deadline, s.d);
-      s.r = responseFile;
-
-      s.h.push(
-        { role: 'user', parts: [{ text: heard }] },
-        { role: 'model', parts: [{ text }] }
-      );
-      if (s.h.length > 12) s.h = s.h.slice(-12);
-
-      if (s.phone) {
-        try {
-          const store = s.historyStore || await loadHistoryStore(s.phone, deadline);
-          let session = historySession(store, s.sessionId);
-
-          if (!session) {
-            session = {
-              id: s.sessionId || crypto.randomBytes(6).toString('hex'),
-              title: heard.slice(0, 55) || 'שיחה חדשה',
-              createdAt: Date.now(), updatedAt: Date.now(), messages: []
-            };
-            s.sessionId = session.id;
-            store.sessions.push(session);
-          }
-
-          session.messages.push(
-            { role: 'user', text: heard, at: Date.now() },
-            { role: 'model', text, at: Date.now() }
-          );
-          session.messages = session.messages.slice(-40);
-          session.updatedAt = Date.now();
-          store.sessions = store.sessions
-            .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
-            .slice(0, HISTORY_LIMIT);
-          s.historyStore = store;
-          await saveHistoryStore(s.phone, store, deadline);
-        } catch (historyError) {
-          console.error(id, 'history save failed:', historyError.message);
-        }
-      }
-
-      console.log(JSON.stringify({
-        callId: id, turn: s.n, result: 'ok',
-        transcriptMs: t2 - t1, answerAndTtsMs: t3 - t2,
-        totalMs: Date.now() - startedAt, searchToolAvailable: SEARCH && searchOk,
-        textModel: TEXT_MODEL, ttsModel: TTS_MODEL
-      }));
-
-      output = ask('f-' + s.d + '/' + responseFile);
-
-    } catch (e) {
-      console.error(JSON.stringify({
-        callId: id, turn: s.n, result: 'failed',
-        elapsedMs: Date.now() - startedAt,
-        status: e.status || null, quotaExhausted: !!e.quotaExhausted,
-        apiStatus: e.apiStatus || null,
-        error: String(e.message || e).slice(0, 700)
-      }));
-      del(questionFile, s.d);
-      output = ask('t-' + cleanYemotText(ERR));
-    }
-
-    return res.send(output);
+    return res.send(await chat(q, s, T0));
   } catch (e) {
-    console.error(id, 'fatal:', e.stack || e.message);
-    if (!res.headersSent) res.send('id_list_message=t-' + cleanYemotText(ERR));
+    // last resort: always answer Yemot with plain text, never HTML or an empty reply
+    console.error(id, 'fatal', e.message);
+    if (!res.headersSent) res.send('id_list_message=t-' + ERR);
   }
 });
 
-// -------------------------------
-// Create a greeting recording
-// -------------------------------
+// ---------- history extension (default extension 4): choose a saved conversation, hear it, continue it ----------
+// keypad prompt; if your Yemot account expects another read format, change only this function
+function askKey(s, pre) {
+  s.n++;
+  s.p = 'H' + s.e + s.n;
+  return 'read=' + pre + '=' + s.p + ',no,tap,1,1,7,No,No,No';
+}
 
+function startChat(s, cid, h) {
+  s.stage = 'chat'; s.cid = cid; s.h = h; s.name = '';
+  return ask(s, 't-' + REC_HINT);
+}
+
+function menu(s, u) {
+  let c = u.c.find(x => x.id === s.sel);
+  if (s.stage !== 'list' && !c) s.stage = 'list';
+  if (s.stage === 'list') {
+    if (!u.c.length) return startChat(s, newCid(), []);
+    const items = u.c.map((x, i) => 'שיחה ' + (i + 1) + ' ' + spx(x.title)).join(' ');
+    return askKey(s, 't-' + sp('שיחות אחרונות ' + items + ' לשיחה חדשה הקישו 9'));
+  }
+  if (s.stage === 'conv') {
+    const l = c.turns[c.turns.length - 1] || { q: '', a: '' };
+    return askKey(s, 't-' + sp('השאלה האחרונה בשיחה ' + spx(l.q).slice(0, 200) + ' והתשובה ' + spx(l.a).slice(0, 300) +
+      ' להמשך השיחה הקישו 1 להאזנה לכל השיחה הקישו 2 לחזרה לרשימה הקישו 3'));
+  }
+  let txt = '';
+  for (let i = c.turns.length - 1; i >= 0; i--) {
+    const part = 'שאלה ' + spx(c.turns[i].q).slice(0, 200) + ' תשובה ' + spx(c.turns[i].a).slice(0, 300) + ' ';
+    if ((part + txt).length > 1500) break;
+    txt = part + txt;
+  }
+  return askKey(s, 't-' + sp(txt + ' להמשך השיחה הקישו 1 לחזרה לרשימה הקישו 3'));
+}
+
+function onKey(s, u, key) {
+  if (s.stage === 'list') {
+    if (key === '9') return startChat(s, newCid(), []);
+    const c = /^[1-8]$/.test(key) ? u.c[Number(key) - 1] : null;
+    if (c) { s.sel = c.id; s.stage = 'conv'; }
+    return menu(s, u);
+  }
+  const c = u.c.find(x => x.id === s.sel);
+  if (!c) { s.stage = 'list'; return menu(s, u); }
+  if (key === '1') return startChat(s, c.id, histOf(c.turns));
+  if (key === '3') { s.stage = 'list'; return menu(s, u); }
+  if (key === '2' && s.stage === 'conv') s.stage = 'full';
+  return menu(s, u);
+}
+
+app.all('/history', async (req, res) => {
+  const q = { ...req.query, ...req.body };
+  const id = 'H' + idOf(q);
+  res.type('text/plain');
+  const T0 = Date.now();
+  try {
+    if (q.hangup === 'yes') {
+      const old = calls[id];
+      if (old && old.r) del(old.r, old.d);
+      delete calls[id];
+      return res.send('noop=bye');
+    }
+    const s = calls[id] || (calls[id] = await mkState(q, HIST_DIR, EXT_FIRST.sys, EXT_FIRST.g, 'list'));
+    s.t = Date.now();
+    if (!s.phone) {
+      return res.send('id_list_message=t-' + sp('לא ניתן לזהות את מספר הטלפון ולכן אין היסטוריית שיחות') + '&go_to_folder=hangup');
+    }
+    if (s.stage === 'chat') return res.send(await chat(q, s, T0));
+
+    const u = await getUser(s.phone);
+    if (!s.p) return res.send(menu(s, u));
+    const key = String(q[s.p] || '').trim();
+    if (!key) {
+      if (++s.idle >= 3) return res.send('go_to_folder=hangup');
+      return res.send(menu(s, u));
+    }
+    s.idle = 0;
+    return res.send(onKey(s, u, key));
+  } catch (e) {
+    console.error(id, 'fatal', e.message);
+    if (!res.headersSent) res.send('id_list_message=t-' + ERR);
+  }
+});
+
+// ---------- tools ----------
+// asks Gemini to read the given text aloud and stores it as a file in the given extension
+// dir is an extension number such as 5 or 5/2, or empty for the main menu of the line; file is the name without .wav
+// optional voice field: male or female
 let lastRec = 0;
-
 app.post('/record', async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').type('text/plain; charset=utf-8');
-
   try {
-    if (String(req.body.token || '') !== TOKEN) {
-      return res.send('ERR הטוקן לא תואם לטוקן ששמור בשירות');
-    }
+    if (String(req.body.token || '') !== TOKEN) return res.send('ERR הטוקן לא תואם לטוקן ששמור בשירות');
     if (Date.now() - lastRec < 6000) return res.send('ERR חכו כמה שניות ונסו שוב');
-
     const dir = String(req.body.dir || '').replace(/^\/+|\/+$/g, '');
     const file = String(req.body.file || 'greet');
-
     if (dir && !/^[0-9]+(\/[0-9]+)*$/.test(dir)) return res.send('ERR מספר שלוחה לא תקין');
     if (!/^[A-Za-z0-9_]{1,20}$/.test(file)) return res.send('ERR שם קובץ לא תקין');
-
     const text = String(req.body.text || '').replace(/\s+/g, ' ').trim().slice(0, 600);
     if (!text) return res.send('ERR הטקסט ריק');
-
     lastRec = Date.now();
     const d = dir ? '/' + dir : '';
     const deadline = Date.now() + 80000;
-    const pcm = await tts(text, deadline);
+    const pcm = await tts(text, deadline, req.body.voice === 'female' ? 'female' : req.body.voice === 'male' ? 'male' : DEFAULT_VOICE);
     await upload(file, pcm, deadline, d);
-
     if (file === 'greet') greetOk[d] = true;
-    res.send('OK ההקלטה נוצרה על ידי ג׳מיני והועלתה אל ' +
-      (dir ? 'שלוחה ' + dir : 'השלוחה הראשית') + ' בשם ' + file + '.wav (' +
-      Math.round(pcm.length / 1024) + 'KB)');
+    res.send('OK ההקלטה נוצרה על ידי ג׳מיני והועלתה אל ' + (dir ? 'שלוחה ' + dir : 'השלוחה הראשית') + ' בשם ' + file + '.wav (' + Math.round(pcm.length / 1024) + 'KB)');
   } catch (e) {
-    console.error('/record failed:', e.message);
-    res.send('ERR ' + String(e.message).slice(0, 250));
+    res.send('ERR ' + String(e.message).slice(0, 200));
   }
 });
 
-// -------------------------------
-// Health and diagnostics
-// -------------------------------
-
-app.get('/health', (req, res) => {
-  res.json({
-    ok: true,
-    extension: EXT,
-    historyExtension: HISTORY_EXT,
-    textModel: TEXT_MODEL,
-    textFallbackConfigured: !!TEXT_MODEL_FALLBACK,
-    ttsModel: TTS_MODEL,
-    ttsFallbackConfigured: !!TTS_MODEL_FALLBACK,
-    webSearchEnabled: SEARCH,
-    searchMode: SEARCH_AUTO ? 'auto' : 'explicit-request-only',
-    voiceSwitching: true,
-    historyEnabled: !!TOKEN,
-    keysConfigured: KEYS.length,
-    ttsKeysConfigured: TTS_KEYS.length
-  });
-});
-
+// quick end to end check of the whole chain, without a phone call
 let lastTest = 0;
-
 app.get('/selftest', async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').type('text/plain; charset=utf-8');
   if (Date.now() - lastTest < 20000) return res.send('ERR נבדק הרגע, חכו 20 שניות ונסו שוב');
   lastTest = Date.now();
-
   const out = [];
   const deadline = Date.now() + 90000;
   const step = async (name, fn) => {
-    try {
-      out.push('OK  ' + name + (await fn() || ''));
-    } catch (e) {
-      out.push('ERR ' + name + ': ' + String(e.message).slice(0, 260));
-    }
+    try { out.push('OK  ' + name + (await fn() || '')); }
+    catch (e) { out.push('ERR ' + name + ': ' + String(e.message).slice(0, 220)); }
   };
   const silent = wav(Buffer.alloc(3200), 8000);
 
-  await step('מפתחות Gemini לתמלול', async () => {
-    if (!KEYS.length) throw new Error('GEMINI_API_KEYS ריק');
-    return ' (' + KEYS.length + ')';
-  });
-  await step('מפתחות Gemini להקראה', async () => {
-    if (!TTS_KEYS.length) throw new Error('GEMINI_TTS_KEYS ריק');
-    return ' (' + TTS_KEYS.length + ')';
-  });
-  await step('טוקן ימות', async () => {
-    if (!TOKEN) throw new Error('YEMOT_TOKEN ריק');
-  });
-  await step('ימות: קריאת שלוחה ' + EXT, async () => {
-    const r = await http(YM + 'GetIVR2Dir?token=' + encodeURIComponent(TOKEN) +
-      '&path=' + encodeURIComponent('ivr2:/' + EXT), {}, 10000, deadline);
+  await step('מפתחות ג׳מיני לתמלול', async () => { if (!KEYS.length) throw new Error('GEMINI_API_KEYS ריק'); return ' (' + KEYS.length + ')'; });
+  await step('מפתחות ג׳מיני להקראה', async () => { if (!TTS_KEYS.length) throw new Error('GEMINI_TTS_KEYS ריק'); return ' (' + TTS_KEYS.length + ')'; });
+  await step('טוקן ימות', async () => { if (!TOKEN || /undefined/.test(TOKEN)) throw new Error('YEMOT_TOKEN ריק'); });
+  await step('ימות: קריאת השלוחה ' + EXT, async () => {
+    const r = await http(YM + 'GetIVR2Dir?token=' + encodeURIComponent(TOKEN) + '&path=' + encodeURIComponent('ivr2:' + EXTP), {}, 10000, deadline);
     const j = await r.json().catch(() => ({}));
     if (j.responseStatus !== 'OK') throw new Error(JSON.stringify(j).slice(0, 180));
   });
-  await step('ימות: העלאה ומחיקה של קובץ בדיקה', async () => {
+  await step('ימות: העלאה ומחיקה של קובץ', async () => {
     await upload('selftest', silent, deadline);
-    const r = await http(YM + 'FileAction?token=' + encodeURIComponent(TOKEN) +
-      '&action=delete&what=' + encodeURIComponent(yp('selftest')),
-      {}, 8000, deadline);
+    const r = await http(YM + 'FileAction?token=' + encodeURIComponent(TOKEN) + '&action=delete&what=' + encodeURIComponent(yp('selftest')), {}, 8000, deadline);
     const j = await r.json().catch(() => ({}));
     if (j.responseStatus !== 'OK') throw new Error('מחיקה: ' + JSON.stringify(j).slice(0, 150));
   });
-  await step('Gemini: בדיקת מודל טקסט', async () => {
-    const a = await gem(TEXT_MODEL, {
-      contents: [{ role: 'user', parts: [{ text: 'ענה במילה אחת: שלום' }] }],
-      generationConfig: { maxOutputTokens: 32 }
-    }, deadline, 'text');
+  await step('ג׳מיני ' + TEXT_MODEL + ' (קלט אודיו)', async () => {
+    const a = await textGen({ contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'audio/wav', data: silent.toString('base64') } }, { text: 'ענה במילה אחת' }] }] }, deadline);
     if (!(((a.candidates || [])[0] || {}).content)) throw new Error('תשובה ריקה');
-    return ' (' + TEXT_MODEL + ')';
+    return ' (thinking: ' + (THINK[thinkIdx] || 'ברירת מחדל') + ')';
   });
-  await step('Gemini: בדיקת TTS', async () => {
-    const p = await tts('בדיקה', deadline);
-    return ' (' + Math.round(p.length / 1024) + 'KB)';
+  await step('ג׳מיני ' + TEXT_MODEL + ' (חיפוש באינטרנט)', async () => {
+    const a = await textGen({ contents: [{ role: 'user', parts: [{ text: 'מה התאריך היום? ענה במילים ספורות' }] }], tools: [{ google_search: {} }] }, deadline);
+    if (!partsText(a)) throw new Error('תשובה ריקה');
   });
-  await step('בדיקת זיהוי בקשת חיפוש', async () => {
-    const ordinary = explicitlyRequestsSearch('מה מזג האוויר?');
-    const explicit = explicitlyRequestsSearch('חפש באינטרנט מה מזג האוויר');
-    if (SEARCH_AUTO ? (ordinary && explicit) : (!ordinary && explicit)) return;
-    throw new Error('בדיקת זיהוי חיפוש נכשלה');
+  await step('ג׳מיני ' + TTS_MODEL + ' (קול גברי)', async () => {
+    const p = await tts('בדיקה', deadline, 'male');
+    return ' (' + VOICE_MALE + ', ' + Math.round(p.length / 1024) + 'KB)';
   });
-
+  await step('ג׳מיני ' + TTS_MODEL + ' (קול נשי)', async () => {
+    const p = await tts('בדיקה', deadline, 'female');
+    return ' (' + VOICE_FEMALE + ', ' + Math.round(p.length / 1024) + 'KB)';
+  });
+  await step('אחסון היסטוריית שיחות (' + (UP_URL && UP_TOK ? 'Upstash' : 'קבצים') + ')', async () => {
+    const raw = String(Date.now());
+    if (UP_URL && UP_TOK) {
+      await upstash(['SET', 'zygy:selftest', raw, 'EX', '60']);
+      if ((await upstash(['GET', 'zygy:selftest'])) !== raw) throw new Error('הקריאה לא תואמת לכתיבה');
+      return '';
+    }
+    await fs.promises.mkdir(DATA_DIR, { recursive: true });
+    const f = path.join(DATA_DIR, 'selftest.tmp');
+    await fs.promises.writeFile(f, raw);
+    await fs.promises.unlink(f);
+    return ' (אזהרה: ב-Render החינמי הקבצים נמחקים בכל הפעלה מחדש, מומלץ להגדיר Upstash)';
+  });
   res.send(out.join('\n'));
 });
 
-// -------------------------------
-// Error handling and startup
-// -------------------------------
-
 app.use((err, req, res, next) => {
-  console.error('Express error:', err && (err.stack || err.message));
-  if (!res.headersSent) res.type('text/plain').send('id_list_message=t-' + cleanYemotText(ERR));
+  console.error('express', err && err.message);
+  if (!res.headersSent) res.type('text/plain').send('id_list_message=t-' + ERR);
 });
+process.on('unhandledRejection', e => console.error('unhandledRejection', e && e.message));
+process.on('uncaughtException', e => console.error('uncaughtException', e && e.message));
 
-process.on('unhandledRejection', e => console.error('unhandledRejection:', e && (e.stack || e.message)));
-process.on('uncaughtException', e => console.error('uncaughtException:', e && (e.stack || e.message)));
-
-app.listen(process.env.PORT || 3000, () => {
-  console.log(JSON.stringify({
-    status: 'started',
-    extension: EXT,
-    historyExtension: HISTORY_EXT,
-    textModel: TEXT_MODEL,
-    textFallback: TEXT_MODEL_FALLBACK || null,
-    ttsModel: TTS_MODEL,
-    ttsFallback: TTS_MODEL_FALLBACK || null,
-    webSearch: SEARCH,
-    searchMode: SEARCH_AUTO ? 'auto' : 'explicit-request-only',
-    voiceSwitching: true,
-    textKeys: KEYS.length,
-    ttsKeys: TTS_KEYS.length
-  }));
-});
+app.listen(process.env.PORT || 3000, () => console.log('zygy up'));
