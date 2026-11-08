@@ -27,7 +27,7 @@ services:
       - key: EXTENSIONS
         value: "[{\"p\":\"1\",\"m\":\"2\",\"g\":\"שלום אנא הקלט את ההודעה בסיום הקש סולמית\",\"x\":\"\"}]"
       - key: MAX_WORDS
-        value: "25"
+        value: "500"
       - key: EXTRA_INSTRUCTION
         value: ""
       - key: GEMINI_API_KEYS
@@ -37,6 +37,3 @@ services:
       - key: YEMOT_TOKEN
         sync: false
       - key: UPSTASH_REDIS_REST_URL
-        sync: false
-      - key: UPSTASH_REDIS_REST_TOKEN
-        sync: false
