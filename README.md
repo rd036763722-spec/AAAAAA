@@ -1,2 +1,2 @@
 # ai
-ZYGY voice assistant
+ voice assistant
