@@ -1,2 +1,2 @@
-# zygy-voice-ai
+# ai
 ZYGY voice assistant
