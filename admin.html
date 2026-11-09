@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>הגדרות העוזר הקולי</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--tx:#1b1f24;--mu:#5d6570;--bd:#d8dce2;--ac:#1f6feb;--ok:#1a7f37;--er:#cf222e;--in:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#14171b;--card:#1d2127;--tx:#e8eaed;--mu:#9aa3ad;--bd:#343a42;--ac:#4c8dff;--ok:#3fb950;--er:#ff6b6b;--in:#14171b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
+.wrap{max-width:780px;margin:0 auto;padding:16px}
+h1{font-size:22px;margin:8px 0 16px}
+h2{font-size:17px;margin:0 0 12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:14px}
+label{display:block;font-weight:600;margin:12px 0 4px}
+.hint{color:var(--mu);font-size:13px;font-weight:400;margin-top:2px}
+input,select,textarea{width:100%;padding:10px;border:1px solid var(--bd);border-radius:8px;background:var(--in);color:var(--tx);font:inherit}
+input[dir=ltr],textarea[dir=ltr]{text-align:left}
+textarea{min-height:70px;resize:vertical}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:600px){.row{grid-template-columns:1fr}}
+button{padding:10px 18px;border:0;border-radius:8px;background:var(--ac);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+button.sec{background:transparent;color:var(--ac);border:1px solid var(--ac)}
+button:disabled{opacity:.6;cursor:wait}
+.bar{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+.msg{margin-top:10px;font-size:14px;white-space:pre-wrap}
+.ok{color:var(--ok)}.er{color:var(--er)}
+.warn{background:rgba(207,34,46,.1);border:1px solid var(--er);color:var(--tx);border-radius:8px;padding:10px;margin-bottom:14px;font-size:14px}
+pre{background:var(--in);border:1px solid var(--bd);border-radius:8px;padding:10px;overflow:auto;direction:ltr;text-align:left;white-space:pre-wrap;font-size:13px}
+.url{display:flex;gap:8px;align-items:center;margin:6px 0}
+.url code{flex:1;direction:ltr;text-align:left;background:var(--in);border:1px solid var(--bd);border-radius:8px;padding:8px;font-size:13px;overflow-x:auto;white-space:nowrap}
+.hide{display:none}
+.saved{font-size:12px;color:var(--ok);font-weight:400}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>הגדרות העוזר הקולי</h1>
+
+<!-- login / first-time setup -->
+<div id="auth" class="card hide">
+  <h2 id="authTitle">התחברות</h2>
+  <p id="authHint" class="hint"></p>
+  <label for="pw">סיסמה</label>
+  <input id="pw" type="password" autocomplete="current-password">
+  <div class="bar"><button id="authBtn">המשך</button></div>
+  <div id="authMsg" class="msg er"></div>
+</div>
+
+<!-- settings -->
+<div id="app" class="hide">
+  <div id="storeWarn" class="warn hide">
+    ההגדרות והיסטוריית השיחות נשמרות כרגע בקובץ מקומי בשרת, והן יימחקו בכל פריסה או הפעלה מחדש ב-Render.
+    כדי שיישמר לצמיתות, צרו מסד Redis חינמי ב-upstash.com והוסיפו ב-Render שני משתנים בלבד:
+    <b>UPSTASH_REDIS_REST_URL</b> ו-<b>UPSTASH_REDIS_REST_TOKEN</b>. את כל השאר מגדירים כאן.
+  </div>
+
+  <div class="card">
+    <h2>1. חיבורים</h2>
+    <label for="groqKeys">מפתח Groq <span class="hint">(console.groq.com/keys) תמלול, תשובות וחיפוש באינטרנט. אפשר כמה מפתחות מופרדים בפסיק</span></label>
+    <input id="groqKeys" dir="ltr" data-secret placeholder="gsk_...">
+    <div class="hint" id="s_groqKeys"></div>
+    <label for="ttsKeys">מפתח ג'מיני להקראה <span class="hint">(aistudio.google.com/apikey) אפשר כמה מופרדים בפסיק</span></label>
+    <input id="ttsKeys" dir="ltr" data-secret placeholder="AIza...">
+    <div class="hint" id="s_ttsKeys"></div>
+    <label for="geminiKeys">מפתח ג'מיני לגיבוי <span class="hint">(לא חובה, משמש אם Groq נכשל)</span></label>
+    <input id="geminiKeys" dir="ltr" data-secret placeholder="AIza...">
+    <div class="hint" id="s_geminiKeys"></div>
+    <label for="yemotToken">טוקן ימות המשיח <span class="hint">בפורמט מספר_מערכת:סיסמה</span></label>
+    <input id="yemotToken" dir="ltr" data-secret placeholder="0771234567:password">
+    <div class="hint" id="s_yemotToken"></div>
+  </div>
+
+  <div class="card">
+    <h2>2. שלוחות בימות המשיח</h2>
+    <div class="row">
+      <div>
+        <label for="extPaths">שלוחת השיחה <span class="hint">מספר, אפשר כמה מופרדים בפסיק (למשל 1,5/2)</span></label>
+        <input id="extPaths" dir="ltr" placeholder="1">
+      </div>
+      <div>
+        <label for="histPath">שלוחת ההיסטוריה <span class="hint">מספר</span></label>
+        <input id="histPath" dir="ltr" placeholder="2">
+      </div>
+    </div>
+    <p class="hint">בכל שלוחה בימות מגדירים סוג API עם הכתובת המתאימה:</p>
+    <div id="urls"></div>
+    <div class="bar"><button class="sec" id="ymBtn">נסה להגדיר את השלוחות בימות אוטומטית</button></div>
+    <div id="ymMsg" class="msg"></div>
+  </div>
+
+  <div class="card">
+    <h2>3. קול ושיחה</h2>
+    <label for="greeting">פתיח <span class="hint">מושמע בתחילת השיחה. ריק = בלי פתיח. אל תשתמשו בפסיקים ובנקודות</span></label>
+    <input id="greeting">
+    <div class="row">
+      <div>
+        <label for="waitMsg">הודעת המתנה <span class="hint">מושמעת בזמן הכנת תשובה. ריק = בלי</span></label>
+        <input id="waitMsg">
+      </div>
+      <div>
+        <label for="searchMsg">הודעה בזמן חיפוש באינטרנט <span class="hint">ריק = כמו הודעת ההמתנה</span></label>
+        <input id="searchMsg">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="voice">קול ברירת מחדל</label>
+        <select id="voice"></select>
+        <div class="hint">אפשר גם לבקש בשיחה: "תחליף לקול גברי" או "דבר לאט"</div>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="maxWords">אורך תשובה מרבי (מילים)</label>
+        <input id="maxWords" type="number" min="30" max="1200">
+      </div>
+      <div>
+        <label for="recMax">אורך הקלטת שאלה מרבי (שניות)</label>
+        <input id="recMax" type="number" min="5" max="120">
+      </div>
+    </div>
+    <label for="extra">הנחיה נוספת לעוזר <span class="hint">לא חובה. טקסט חופשי שיתווסף להנחיות</span></label>
+    <textarea id="extra"></textarea>
+  </div>
+
+  <div class="card">
+    <h2>4. חיפוש באינטרנט</h2>
+    <label for="searchMode">מתי לחפש</label>
+    <select id="searchMode">
+      <option value="on-request">רק כשמבקשים ("חפש באינטרנט")</option>
+      <option value="always">תמיד</option>
+      <option value="off">אף פעם</option>
+    </select>
+    <label for="searchDomains">הגבלה לאתרים מסוימים <span class="hint">לא חובה. למשל ynet.co.il,mako.co.il. ריק = כל האינטרנט</span></label>
+    <input id="searchDomains" dir="ltr" placeholder="ynet.co.il,mako.co.il">
+    <label for="searchExclude">אתרים לדלג עליהם <span class="hint">לא חובה</span></label>
+    <input id="searchExclude" dir="ltr">
+  </div>
+
+  <div class="card">
+    <h2>5. היסטוריה</h2>
+    <div class="row">
+      <div>
+        <label for="historyMaxConvs">כמה שיחות לשמור (1 עד 9)</label>
+        <input id="historyMaxConvs" type="number" min="1" max="9">
+      </div>
+      <div>
+        <label for="historyTtlDays">ימים עד מחיקה אוטומטית <span class="hint">0 = לא למחוק</span></label>
+        <input id="historyTtlDays" type="number" min="0">
+      </div>
+    </div>
+    <label for="historyBack">בסיום תפריט ההיסטוריה <span class="hint">hangup לניתוק, או / לחזרה לתפריט הראשי</span></label>
+    <input id="historyBack" dir="ltr">
+    <p class="hint">ההיסטוריה נשמרת לפי מספר הטלפון של המתקשר, ולכן לא תעבוד למספר חסוי. בתפריט אפשר לשמוע שיחה, להמשיך אותה, למחוק אותה או למחוק הכול.</p>
+  </div>
+
+  <div class="card">
+    <h2>6. מתקדם</h2>
+    <div class="row">
+      <div><label for="chatModel">מודל תשובות (Groq)</label><input id="chatModel" dir="ltr"></div>
+      <div><label for="groqModel">מודל לחיפוש (Groq)</label><input id="groqModel" dir="ltr"></div>
+    </div>
+    <div class="row">
+      <div><label for="sttModel">מודל תמלול (Groq)</label><input id="sttModel" dir="ltr"></div>
+      <div><label for="ttsModel">מודל הקראה (ג'מיני)</label><input id="ttsModel" dir="ltr"></div>
+    </div>
+    <div class="row">
+      <div><label for="textModel">מודל גיבוי (ג'מיני)</label><input id="textModel" dir="ltr"></div>
+      <div><label for="turnBudgetMs">זמן מרבי לתשובה (מילישניות)</label><input id="turnBudgetMs" type="number" min="10000" max="120000"></div>
+    </div>
+  </div>
+
+  <div class="bar">
+    <button id="saveBtn">שמור</button>
+    <button class="sec" id="testBtn">בדוק חיבורים</button>
+    <button class="sec" id="outBtn">התנתק</button>
+  </div>
+  <div id="saveMsg" class="msg"></div>
+  <pre id="testOut" class="hide"></pre>
+</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let TOKEN = sessionStorage.getItem('vt') || '';
+let CFG = null;
+const SECRETS = ['groqKeys', 'ttsKeys', 'geminiKeys', 'yemotToken'];
+const FIELDS = ['greeting','waitMsg','searchMsg','voice','maxWords','recMax','extra','searchMode','searchDomains','searchExclude','extPaths','histPath','historyMaxConvs','historyTtlDays','historyBack','chatModel','groqModel','sttModel','ttsModel','textModel','turnBudgetMs'];
+
+async function api(path, body, method) {
+  const r = await fetch('/admin/api/' + path, {
+    method: method || (body ? 'POST' : 'GET'),
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': TOKEN },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && TOKEN) { logout(); }
+  if (!r.ok) throw new Error(j.error || ('שגיאה ' + r.status));
+  return j;
+}
+function logout() { TOKEN = ''; sessionStorage.removeItem('vt'); location.reload(); }
+function msg(el, text, ok) { el.textContent = text; el.className = 'msg ' + (ok ? 'ok' : 'er'); }
+
+async function init() {
+  if (TOKEN) { try { await load(); return; } catch (e) { TOKEN = ''; } }
+  const st = await fetch('/admin/api/state').then(r => r.json());
+  $('auth').classList.remove('hide');
+  if (st.setup) {
+    $('authTitle').textContent = 'יצירת סיסמה';
+    $('authHint').textContent = 'זו הכניסה הראשונה. בחרו סיסמה (לפחות 6 תווים) לניהול ההגדרות.';
+    $('pw').autocomplete = 'new-password';
+  }
+  const go = async () => {
+    $('authBtn').disabled = true;
+    try {
+      if (st.setup) await api('setup', { password: $('pw').value });
+      const j = await api('login', { password: $('pw').value });
+      TOKEN = j.token; sessionStorage.setItem('vt', TOKEN);
+      $('auth').classList.add('hide');
+      await load();
+    } catch (e) { msg($('authMsg'), e.message, false); }
+    $('authBtn').disabled = false;
+  };
+  $('authBtn').onclick = go;
+  $('pw').onkeydown = e => { if (e.key === 'Enter') go(); };
+}
+
+async function load() {
+  CFG = await api('config');
+  $('app').classList.remove('hide');
+  $('storeWarn').classList.toggle('hide', CFG.storage === 'upstash');
+  const vs = $('voice'); vs.innerHTML = '';
+  for (const [g, label] of [['male', 'קולות גבריים'], ['female', 'קולות נשיים']]) {
+    const og = document.createElement('optgroup'); og.label = label;
+    for (const v of CFG.voices[g]) { const o = document.createElement('option'); o.value = v; o.textContent = v; og.appendChild(o); }
+    vs.appendChild(og);
+  }
+  for (const f of FIELDS) { const el = $(f); if (el && CFG.config[f] !== undefined) el.value = CFG.config[f]; }
+  for (const k of SECRETS) { $('s_' + k).textContent = CFG.secrets[k] ? 'שמור: ' + CFG.secrets[k] + '. השאירו ריק כדי לא לשנות' : 'עדיין לא הוגדר'; $(k).value = ''; }
+  renderUrls();
+  ['extPaths', 'histPath'].forEach(i => $(i).oninput = renderUrls);
+}
+
+function renderUrls() {
+  const base = CFG.urls.base;
+  const paths = $('extPaths').value.split(',').map(s => s.trim().replace(/^\/+|\/+$/g, '')).filter(Boolean);
+  const hp = $('histPath').value.trim().replace(/^\/+|\/+$/g, '');
+  const first = paths[0] || '1';
+  const rows = paths.map(p => ['שלוחה ' + p + ' (שיחה)', base + '/yemot/' + p.replace(/\//g, '_')]);
+  if (hp) rows.push(['שלוחה ' + hp + ' (היסטוריה)', base + '/hist' + (first.includes('/') ? '/' + first.replace(/\//g, '_') : '')]);
+  $('urls').innerHTML = '';
+  for (const [name, url] of rows) {
+    const d = document.createElement('div');
+    d.innerHTML = '<div class="hint"></div><div class="url"><code></code><button class="sec" type="button">העתק</button></div>';
+    d.querySelector('.hint').textContent = name;
+    d.querySelector('code').textContent = url;
+    d.querySelector('button').onclick = e => { navigator.clipboard && navigator.clipboard.writeText(url); e.target.textContent = 'הועתק'; setTimeout(() => e.target.textContent = 'העתק', 1500); };
+    $('urls').appendChild(d);
+  }
+}
+
+function collect() {
+  const b = {};
+  for (const f of FIELDS) { const el = $(f); if (el) b[f] = el.value; }
+  for (const k of SECRETS) { const v = $(k).value.trim(); if (v) b[k] = v; }
+  return b;
+}
+async function save() {
+  $('saveBtn').disabled = true;
+  try { await api('config', collect()); msg($('saveMsg'), 'נשמר. השינויים פעילים מיד, בלי הפעלה מחדש.', true); await load(); }
+  catch (e) { msg($('saveMsg'), e.message, false); }
+  $('saveBtn').disabled = false;
+}
+$('saveBtn').onclick = save;
+$('outBtn').onclick = logout;
+$('testBtn').onclick = async () => {
+  $('testBtn').disabled = true; $('testOut').classList.remove('hide'); $('testOut').textContent = 'בודק... זה לוקח כמה שניות';
+  try { await api('config', collect()); const j = await api('test', {}); $('testOut').textContent = j.result; }
+  catch (e) { $('testOut').textContent = e.message; }
+  $('testBtn').disabled = false;
+};
+$('ymBtn').onclick = async () => {
+  $('ymBtn').disabled = true; msg($('ymMsg'), 'שולח לימות...', true);
+  try { await api('config', collect()); const j = await api('yemot-setup', {}); $('ymMsg').textContent = j.result; $('ymMsg').className = 'msg'; $('ymMsg').style.direction = 'ltr'; $('ymMsg').style.textAlign = 'left'; }
+  catch (e) { msg($('ymMsg'), e.message, false); }
+  $('ymBtn').disabled = false;
+};
+init();
+</script>
+</body>
+</html>

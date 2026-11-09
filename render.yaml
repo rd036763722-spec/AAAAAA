@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: voice-ai
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # the only two settings needed here: a free Redis database from upstash.com,
+      # so that the admin page settings and call history survive restarts.
+      # Everything else is entered in the admin page: https://YOUR-APP.onrender.com/admin
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
